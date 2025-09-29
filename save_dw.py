@@ -1,7 +1,8 @@
-import os
+import os, re
 from datetime import datetime, timezone
 import requests
 import spotipy
+from spotipy.exceptions import SpotifyException
 
 def get_access_token(client_id, client_secret, refresh_token):
     resp = requests.post(
@@ -21,22 +22,39 @@ def spotify_client():
     )
     return spotipy.Spotify(auth=token)
 
+def normalize_playlist_id(raw: str) -> str:
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    if re.fullmatch(r"[A-Za-z0-9]{22}", raw):
+        return raw
+    m = re.search(r"spotify:playlist:([A-Za-z0-9]{22})", raw)
+    if m: return m.group(1)
+    m = re.search(r"/playlist/([A-Za-z0-9]{22})", raw)
+    if m: return m.group(1)
+    raise ValueError("DW_PLAYLIST_ID is not a valid ID/URL")
+
 def find_dw_playlist_id(sp):
-    pid = os.environ.get("DW_PLAYLIST_ID")
-    if pid:
-        return pid
+    raw = os.environ.get("DW_PLAYLIST_ID", "")
+    if raw:
+        return normalize_playlist_id(raw)
+
+    # Fallback: try to locate by name + owner
     results = sp.current_user_playlists(limit=50)
-    while results:
+    while True:
         for pl in results["items"]:
-            name = (pl["name"] or "").lower()
-            owner = (pl["owner"]["id"] or "").lower()
+            name = (pl.get("name") or "").lower()
+            owner = (pl.get("owner", {}).get("id") or "").lower()
             if name == "discover weekly" and owner == "spotify":
                 return pl["id"]
-        if results["next"]:
+        if results.get("next"):
             results = sp.next(results)
         else:
             break
-    raise RuntimeError("Couldn’t find 'Discover Weekly'. Set DW_PLAYLIST_ID as a secret.")
+    raise RuntimeError(
+        "Couldn't find 'Discover Weekly' in your playlists. "
+        "Set DW_PLAYLIST_ID as a secret with the raw ID or full link."
+    )
 
 def fetch_tracks(sp, playlist_id):
     uris = []
@@ -64,21 +82,37 @@ def create_new_weekly_playlist(sp, base="Discover Weekly"):
     pl = sp.user_playlist_create(user=me["id"], name=name, public=False, description=desc)
     return pl["id"]
 
-def chunked(seq, n): 
-    for i in range(0, len(seq), n): 
+def chunked(seq, n):
+    for i in range(0, len(seq), n):
         yield seq[i : i + n]
 
 def main():
     sp = spotify_client()
-    dw_id = find_dw_playlist_id(sp)
-    tracks = fetch_tracks(sp, dw_id)
+    try:
+        dw_id = find_dw_playlist_id(sp)
+    except Exception as e:
+        raise SystemExit(f"[setup] {e}")
+
+    try:
+        tracks = fetch_tracks(sp, dw_id)
+    except SpotifyException as e:
+        # Clearer hints for 403/404 on algorithmic playlists
+        if e.http_status in (403, 404):
+            raise SystemExit(
+                f"[access] Spotify API denied access to Discover Weekly (HTTP {e.http_status}). "
+                "This often happens with newer developer apps. "
+                "Workarounds: set DW_PLAYLIST_ID to your exact DW link/ID, or use a pre-approved service."
+            )
+        raise
+
     if not tracks:
-        print("No tracks found, exiting.")
+        print("[info] No tracks found; exiting.")
         return
+
     new_pl = create_new_weekly_playlist(sp)
     for batch in chunked(tracks, 100):
         sp.playlist_add_items(new_pl, batch)
-    print(f"Saved {len(tracks)} tracks into a new playlist.")
+    print(f"[done] Saved {len(tracks)} tracks into a new playlist.")
 
 if __name__ == "__main__":
     main()
