@@ -1,0 +1,22 @@
+name: Save Discover Weekly (weekly)
+
+on:
+  schedule:
+    - cron: "30 3 * * 1"  # 03:30 UTC (≈ 06:30 Monday in Bucharest)
+  workflow_dispatch: {}
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install spotipy requests
+      - run: python save_dw.py
+        env:
+          SPOTIFY_CLIENT_ID: ${{ secrets.SPOTIFY_CLIENT_ID }}
+          SPOTIFY_CLIENT_SECRET: ${{ secrets.SPOTIFY_CLIENT_SECRET }}
+          SPOTIFY_REFRESH_TOKEN: ${{ secrets.SPOTIFY_REFRESH_TOKEN }}
+          DW_PLAYLIST_ID: ${{ secrets.DW_PLAYLIST_ID }} # optional but recommended
